@@ -215,7 +215,7 @@ function updateUpgradeButtons(){
 }
 function updateBattleHud(title,remaining){
   const moneyClass=coinFl>0?((coinFl*8|0)%2===0?'lose':''):coinGn>0?'gain':'';
-  const text=title+'第 '+(lv+1)+'/'+LV.length+' 关  剩余 '+remaining+'\nG coin <span class="'+moneyClass+'">'+(developerMode()?'∞':coins)+'</span>  生命 '+'■'.repeat(P.hp)+'□'.repeat(5-P.hp);
+  const text=title+'第 '+(lv+1)+'/'+LV.length+' 关  剩余 '+remaining+'\nG coin <span class="'+moneyClass+'">'+(developerMode()?'∞':coins)+'<br></span>  生命 '+'■'.repeat(P.hp)+'□'.repeat(5-P.hp);
   if(text!==hs){hs=text;$('st').innerHTML=text;}
   updateUpgradeButtons();
 }
@@ -4205,5 +4205,736 @@ requestAnimationFrame(loop);
 
 
 
+</script>
+<script>
+/* ============================================================
+   Geometric Echo · 音频模块 v2
+   重写版：节奏感 BGM + 音量控制台 + 重做的射击音效
+   ============================================================ */
+
+var Sound = (function(){
+  const AC = window.AudioContext || window.webkitAudioContext;
+  let ctx = null, master = null, musicBus = null, sfxBus = null;
+  let noiseBuf = null, muted = false, audioReady = false;
+
+  const VOL = { master: 0.80, music: 0.55, sfx: 0.70 };
+  try {
+    const s = JSON.parse(localStorage.getItem('ge_audio_vol') || 'null');
+    if (s && typeof s === 'object') {
+      if (typeof s.master === 'number') VOL.master = Math.max(0, Math.min(1, s.master));
+      if (typeof s.music  === 'number') VOL.music  = Math.max(0, Math.min(1, s.music));
+      if (typeof s.sfx    === 'number') VOL.sfx    = Math.max(0, Math.min(1, s.sfx));
+    }
+  } catch(e){}
+  try { muted = localStorage.getItem('ge_audio_muted') === '1'; } catch(e){}
+  function saveVol(){ try { localStorage.setItem('ge_audio_vol', JSON.stringify(VOL)); } catch(e){} }
+
+  function init(){
+    if (ctx || !AC) return;
+    ctx = new AC();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -18; comp.knee.value = 20; comp.ratio.value = 8;
+    comp.attack.value = 0.003; comp.release.value = 0.22;
+    comp.connect(ctx.destination);
+    master = ctx.createGain(); master.gain.value = muted ? 0 : VOL.master; master.connect(comp);
+    musicBus = ctx.createGain(); musicBus.gain.value = VOL.music; musicBus.connect(master);
+    sfxBus   = ctx.createGain(); sfxBus.gain.value   = VOL.sfx;   sfxBus.connect(master);
+    audioReady = true;
+  }
+  function unlock(){ init(); if (ctx && ctx.state === 'suspended') ctx.resume(); }
+  function ensureNoise(){
+    if (noiseBuf) return noiseBuf;
+    const len = Math.floor(ctx.sampleRate * 1);
+    noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    return noiseBuf;
+  }
+
+
+
+  function tone(o){
+    if (!ctx || muted) return;
+    const { freq=440, freqEnd=null, type='square', dur=0.15, vol=0.3, attack=0.004, at=null, bus=null } = o;
+    const t0 = at ?? ctx.currentTime;
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    if (freqEnd) osc.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0001, vol), t0 + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(g); g.connect(bus || sfxBus);
+    osc.start(t0); osc.stop(t0 + dur + 0.03);
+  }
+  function noise(o){
+    if (!ctx || muted) return;
+    const { dur=0.3, vol=0.3, f1=2000, f2=200, type='lowpass', at=null, bus=null, Q=1 } = o;
+    const t0 = at ?? ctx.currentTime;
+    const src = ctx.createBufferSource();
+    src.buffer = ensureNoise(); src.loop = true;
+    const flt = ctx.createBiquadFilter();
+    flt.type = type; flt.Q.value = Q;
+    flt.frequency.setValueAtTime(f1, t0);
+    flt.frequency.exponentialRampToValueAtTime(Math.max(20, f2), t0 + dur);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(flt); flt.connect(g); g.connect(bus || sfxBus);
+    src.start(t0); src.stop(t0 + dur + 0.02);
+  }
+
+  function kick(t){
+    if (!ctx || muted) return;
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(150, t);
+    osc.frequency.exponentialRampToValueAtTime(42, t + 0.11);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.55, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+    osc.connect(g); g.connect(musicBus);
+    osc.start(t); osc.stop(t + 0.24);
+    const n = ctx.createBufferSource(); n.buffer = ensureNoise();
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 3500;
+    const g2 = ctx.createGain();
+    g2.gain.setValueAtTime(0.12, t);
+    g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.02);
+    n.connect(hp); hp.connect(g2); g2.connect(musicBus);
+    n.start(t); n.stop(t + 0.03);
+  }
+  function snare(t){
+    if (!ctx || muted) return;
+    const n = ctx.createBufferSource(); n.buffer = ensureNoise();
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.9;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.22, t + 0.003);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+    n.connect(bp); bp.connect(g); g.connect(musicBus);
+    n.start(t); n.stop(t + 0.16);
+    const osc = ctx.createOscillator(), g2 = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(200, t);
+    osc.frequency.exponentialRampToValueAtTime(130, t + 0.06);
+    g2.gain.setValueAtTime(0.0001, t);
+    g2.gain.exponentialRampToValueAtTime(0.14, t + 0.003);
+   
+   g2.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
+    osc.connect(g2); g2.connect(musicBus);
+    osc.start(t); osc.stop(t + 0.1);
+  }
+  function hat(t, open){
+    if (!ctx || muted) return;
+    const n = ctx.createBufferSource(); n.buffer = ensureNoise();
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 8500;
+    const g = ctx.createGain();
+    const dur = open ? 0.11 : 0.028;
+    g.gain.setValueAtTime(0.09, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    n.connect(hp); hp.connect(g); g.connect(musicBus);
+    n.start(t); n.stop(t + dur + 0.01);
+  }
+  function bassNote(t, freq, dur){
+    if (!ctx || muted) return;
+    const osc = ctx.createOscillator(), flt = ctx.createBiquadFilter(), g = ctx.createGain();
+    osc.type = 'sawtooth'; osc.frequency.value = freq;
+    flt.type = 'lowpass'; flt.Q.value = 5;
+    flt.frequency.setValueAtTime(900, t);
+    flt.frequency.exponentialRampToValueAtTime(220, t + dur * 0.9);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.20, t + 0.006);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(flt); flt.connect(g); g.connect(musicBus);
+    osc.start(t); osc.stop(t + dur + 0.03);
+  }
+  function leadNote(t, freq, dur){
+    if (!ctx || muted) return;
+    const osc = ctx.createOscillator(), flt = ctx.createBiquadFilter(), g = ctx.createGain();
+    osc.type = 'square'; osc.frequency.value = freq;
+    flt.type = 'lowpass'; flt.Q.value = 1.5;
+    flt.frequency.setValueAtTime(3200, t);
+    flt.frequency.exponentialRampToValueAtTime(1400, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.055, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(flt); flt.connect(g); g.connect(musicBus);
+    osc.start(t); osc.stop(t + dur + 0.02);
+  }
+  // 第三章新增：干净的高音琶音
+  function arpNote(t, freq, dur){
+    if (!ctx || muted) return;
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.type = 'triangle'; osc.frequency.value = freq;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.05, t + 0.004);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g); g.connect(musicBus);
+    osc.start(t); osc.stop(t + dur + 0.02);
+  }
+
+  const PRESETS = {
+    shoot(){
+      tone({ freq: 340, freqEnd: 90, type: 'triangle', dur: 0.05, vol: 0.075, attack: 0.002 });
+      tone({ freq: 160, freqEnd: 80, type: 'sine',     dur: 0.06, vol: 0.06 });
+      noise({ dur: 0.015, vol: 0.04, f1: 8000, f2: 5000, type: 'highpass' });
+    },
+    hit(){    tone({ freq: 640, freqEnd: 300, type: 'triangle', dur: 0.045, vol: 0.05 }); },
+    kill(){   tone({ freq: 380, freqEnd: 120, type: 'triangle', dur: 0.075, vol: 0.07 });
+              noise({ dur: 0.06, vol: 0.045, f1: 2200, f2: 500 }); },
+    pop(){    noise({ dur: 0.12, vol: 0.09, f1: 1800, f2: 180 }); },
+    explosion(){ noise({ dur: 0.5, vol: 0.30, f1: 1400, f2: 40 });
+                 tone({ freq: 92, freqEnd: 28, type: 'sine', dur: 0.42, vol: 0.24 }); },
+    missile(){ tone({ freq: 900, freqEnd: 220, type: 'triangle', dur: 0.14, vol: 0.08 });
+               noise({ dur: 0.22, vol: 0.13, f1: 3000, f2: 300 }); },
+    hurt(){   tone({ freq: 420, freqEnd: 110, type: 'sawtooth', dur: 0.28, vol: 0.15 });
+              noise({ dur: 0.12, vol: 0.09, f1: 1600, f2: 200 }); },
+    coin(){   tone({ freq: 988,  type: 'triangle', dur: 0.055, vol: 0.09 });
+              tone({ freq: 1319, type: 'triangle', dur: 0.10, vol: 0.09, at: ctx.currentTime + 0.055 }); },
+    upgrade(){ [523, 659, 784, 1047].forEach((f,i) =>
+                 tone({ freq: f, type: 'triangle', dur: 0.13, vol: 0.12, at: ctx.currentTime + i*0.055 })); },
+    warning(){ tone({ freq: 220, type: 'square', dur: 0.55, vol: 0.10 });
+               tone({ freq: 233, type: 'square', dur: 0.55, vol: 0.09 }); },
+    bossDown(){ noise({ dur: 1.0, vol: 0.32, f1: 1200, f2: 30 });
+                [330, 392, 523, 659].forEach((f,i) =>
+                  tone({ freq: f, type: 'triangle', dur: 0.24, vol: 0.13, at: ctx.currentTime + 0.1 + i*0.09 })); },
+    win(){ [523, 659, 784, 1047, 1319, 1568].forEach((f,i) =>
+             tone({ freq: f, type: 'triangle', dur: 0.2, vol: 0.13, at: ctx.currentTime + i*0.11 })); },
+    gameover(){ [440, 392, 349, 262].forEach((f,i) =>
+                  tone({ freq: f, type: 'triangle', dur: 0.34, vol: 0.14, at: ctx.currentTime + i*0.22 })); },
+    levelStart(){ [392, 523, 659].forEach((f,i) =>
+                    tone({ freq: f, type: 'triangle', dur: 0.18, vol: 0.12, at: ctx.currentTime + i*0.08 })); },
+    click(){ tone({ freq: 1180, freqEnd: 880, type: 'triangle', dur: 0.04, vol: 0.06 }); }
+  };
+  const THROTTLE = { shoot: 60, hit: 55, kill: 45, pop: 55, explosion: 130,
+                     missile: 110, hurt: 380, coin: 50, click: 40 };
+  const lastPlayed = Object.create(null);
+  function play(name){
+    if (muted) return;
+    init(); if (!ctx) return;
+    if (ctx.state === 'suspended') { ctx.resume(); return; }
+    const min = THROTTLE[name] || 0;
+    if (min) {
+      const now = ctx.currentTime * 1000;
+      if (now - (lastPlayed[name] || -1e9) < min) return;
+      lastPlayed[name] = now;
+    }
+    const fn = PRESETS[name];
+    if (fn) fn();
+  }
+
+
+  const SEMI = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
+  function nf(name){
+    if (!name) return 0;
+    const m = /^([A-G])([#b]?)(-?\d)$/.exec(name);
+    if (!m) return 0;
+    const s = SEMI[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
+    return 440 * Math.pow(2, (s + (parseInt(m[3], 10) + 1) * 12 - 69) / 12);
+  }
+
+  // ★★★ 全新曲库：每章 8 小节 = 128 步，风格各异 ★★★
+  const TRACKS = {
+    // 菜单：平静探索感
+    menu: { bpm: 100, length: 128,
+      kick:  [0, 16, 32, 48, 64, 80, 96, 112],
+      snare: [8, 24, 40, 56, 72, 88, 104, 120],
+      hat:   [4, 12, 20, 28, 36, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116, 124],
+      hatOpen: [],
+      bass: [
+        'A2',null,null,null,null,null,null,null,'E3',null,null,null,null,null,null,null,
+        'F2',null,null,null,null,null,null,null,'C3',null,null,null,null,null,null,null,
+        'C3',null,null,null,null,null,null,null,'G3',null,null,null,null,null,null,null,
+        'G2',null,null,null,null,null,null,null,'D3',null,null,null,null,null,null,null,
+        'A2',null,null,null,null,null,null,null,'E3',null,null,null,null,null,null,null,
+        'F2',null,null,null,null,null,null,null,'C3',null,null,null,null,null,null,null,
+        'C3',null,null,null,null,null,null,null,'G3',null,null,null,null,null,null,null,
+        'G2',null,null,null,null,null,null,null,'D3',null,null,null,null,null,null,null
+      ],
+      lead: [
+        'A4',null,null,null,'C5',null,'E5',null,null,null,'D5',null,'C5',null,null,null,
+        null,null,'A4',null,null,null,null,null,'F4',null,null,null,'G4',null,'A4',null,
+        null,null,'C5',null,null,null,'E5',null,null,null,'G5',null,'E5',null,null,null,
+        'D5',null,null,null,null,null,'C5',null,null,null,'A4',null,null,null,null,null,
+        'E5',null,'A5',null,null,null,'C6',null,null,null,'B5',null,'A5',null,'E5',null,
+        'A5',null,null,null,'F5',null,null,null,'E5',null,'D5',null,'C5',null,null,null,
+        'D5',null,'E5',null,'G5',null,'E5',null,'G5',null,'A5',null,'G5',null,null,null,
+        'D5',null,null,null,'C5',null,null,null,'A4',null,null,null,null,null,null,null
+      ]
+    },
+
+    // 第一章：舒缓·轻松·有趣 · C大调 I-vi-IV-V
+    ch1: { bpm: 112, length: 128,
+      kick:  [0, 16, 32, 48, 64, 80, 96, 112],
+      snare: [8, 24, 40, 56, 72, 88, 104, 120],
+      hat:   [4, 12, 20, 28, 36, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116, 124],
+      hatOpen: [],
+      bass: [
+        'C2',null,null,null,null,null,null,null,'G2',null,null,null,null,null,null,null,
+        'A2',null,null,null,null,null,null,null,'E2',null,null,null,null,null,null,null,
+        'F2',null,null,null,null,null,null,null,'C3',null,null,null,null,null,null,null,
+        'G2',null,null,null,null,null,null,null,'D3',null,null,null,null,null,null,null,
+        'C2',null,null,null,null,null,null,null,'G2',null,null,null,null,null,null,null,
+        'A2',null,null,null,null,null,null,null,'E2',null,null,null,null,null,null,null,
+        'F2',null,null,null,null,null,null,null,'C3',null,null,null,null,null,null,null,
+        'G2',null,null,null,null,null,null,null,'D3',null,null,null,null,null,null,null
+      ],
+      lead: [
+        'C5',null,null,null,'E5',null,'G5',null,null,'A5','G5','E5',null,'D5',null,null,
+        'C5',null,null,null,'A4',null,'C5',null,'D5',null,'E5',null,'G5',null,null,null,
+        'F5',null,null,null,'E5',null,'D5',null,'C5',null,'A4',null,'G4',null,null,null,
+        'A4',null,'C5',null,'F5',null,'E5',null,'D5',null,'C5',null,null,null,null,null,
+        'E5',null,null,null,'G5',null,'C6',null,null,'B5','A5','G5',null,'E5',null,null,
+        'A5',null,null,null,'E5',null,'A5',null,'B5',null,'C6',null,'B5',null,null,null,
+        'A5',null,null,null,'G5',null,'F5',null,'E5',null,'C5',null,'A4',null,null,null,
+        'C5',null,'E5',null,'G5',null,'F5',null,'E5',null,'D5',null,'C5',null,null,null
+      ]
+    },
+
+    // 第二章：植物大战僵尸·泳池关卡风格 · F大调 · 112 BPM · lounge
+ch2: { bpm: 112, length: 128,
+  kick:  [0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120],
+  snare: [4, 12, 20, 28, 36, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116, 124],
+  hat:   [0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,
+          48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,
+          92,94,96,98,100,102,104,106,108,110,112,114,116,118,120,122,124,126],
+  hatOpen: [14, 30, 46, 62, 78, 94, 110, 126],
+  bass: [
+    // Fmaj7 walking bass
+    'F2',null,null,null,'A2',null,null,null,'C3',null,null,null,'A2',null,null,null,
+    // Dm7
+    'D2',null,null,null,'F2',null,null,null,'A2',null,null,null,'F2',null,null,null,
+    // Gm7
+    'G2',null,null,null,'Bb2',null,null,null,'D3',null,null,null,'Bb2',null,null,null,
+    // C7
+    'C3',null,null,null,'E3',null,null,null,'G3',null,null,null,'Bb2',null,null,null,
+    // 第二遍循环
+    'F2',null,null,null,'A2',null,null,null,'C3',null,null,null,'A2',null,null,null,
+    'D2',null,null,null,'F2',null,null,null,'A2',null,null,null,'F2',null,null,null,
+    'G2',null,null,null,'Bb2',null,null,null,'D3',null,null,null,'Bb2',null,null,null,
+    'C3',null,null,null,'E3',null,null,null,'G3',null,null,null,'Bb2',null,null,null
+  ],
+  lead: [
+    // 马林巴式旋律，五声音阶为主，悠闲下行
+    'F5',null,'A5',null,'C6',null,'A5',null,'G5',null,'F5',null,'E5',null,'D5',null,
+    'D5',null,'F5',null,'A5',null,'F5',null,'E5',null,'D5',null,'C5',null,'D5',null,
+    'G5',null,'Bb5',null,'D6',null,'Bb5',null,'A5',null,'G5',null,'F5',null,'G5',null,
+    'E5',null,'G5',null,'Bb5',null,'G5',null,'F5',null,'E5',null,'D5',null,'C5',null,
+    // 第二遍，结尾收束
+    'F5',null,'A5',null,'C6',null,'A5',null,'G5',null,'A5',null,'G5',null,'F5',null,
+    'D5',null,'F5',null,'A5',null,'F5',null,'E5',null,'F5',null,'E5',null,'D5',null,
+    'Bb4',null,'D5',null,'G5',null,'Bb5',null,'A5',null,'G5',null,'F5',null,'G5',null,
+    'E5',null,'D5',null,'C5',null,'D5',null,'E5',null,'F5',null,'A5',null,'C6',null
+  ],
+  arp: [
+    // 电钢琴 syncopated comping，落在 8 分反拍
+    null,null,'A3',null,null,null,'C4',null,null,null,'E4',null,null,null,'C4',null,
+    null,null,'F3',null,null,null,'A3',null,null,null,'C4',null,null,null,'A3',null,
+    null,null,'Bb3',null,null,null,'D4',null,null,null,'F4',null,null,null,'D4',null,
+    null,null,'E3',null,null,null,'G3',null,null,null,'Bb3',null,null,null,'E4',null,
+    null,null,'A3',null,null,null,'C4',null,null,null,'E4',null,null,null,'C4',null,
+    null,null,'F3',null,null,null,'A3',null,null,null,'C4',null,null,null,'A3',null,
+    null,null,'Bb3',null,null,null,'D4',null,null,null,'F4',null,null,null,'D4',null,
+    null,null,'E3',null,null,null,'G3',null,null,null,'Bb3',null,null,null,'E4',null
+  ]
+},
+
+    // 第三章：辉煌·紧张·挑战 · Am (Am-F-C-G) + 琶音层
+    ch3: { bpm: 144, length: 128,
+      kick:  [0, 6, 8, 14, 16, 22, 24, 30, 32, 38, 40, 46, 48, 54, 56, 62, 64, 70, 72, 78, 80, 86, 88, 94, 96, 102, 104, 110, 112, 118, 120, 126],
+      snare: [8, 24, 40, 56, 72, 88, 104, 120],
+      hat:   [0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46,48,50,52,54,56,58,60,62,64,66,68,70,72,74,76,78,80,82,84,86,88,90,92,94,96,98,100,102,104,106,108,110,112,114,116,118,120,122,124,126],
+      hatOpen: [12, 28, 44, 60, 76, 92, 108, 124],
+      bass: [
+        'A2',null,'A2',null,null,null,null,null,'E3',null,'A2',null,null,null,null,null,
+        'F2',null,'F2',null,null,null,null,null,'C3',null,'F2',null,null,null,null,null,
+        'C3',null,'C3',null,null,null,null,null,'G3',null,'C3',null,null,null,null,null,
+        'G2',null,'G2',null,null,null,null,null,'D3',null,'G2',null,null,null,null,null,
+        'A2',null,'A2',null,null,null,null,null,'E3',null,'A2',null,null,null,null,null,
+        'F2',null,'F2',null,null,null,null,null,'C3',null,'F2',null,null,null,null,null,
+        'C3',null,'C3',null,null,null,null,null,'G3',null,'C3',null,null,null,null,null,
+        'G2',null,'G2',null,null,null,null,null,'D3',null,'G2',null,null,null,null,null
+      ],
+      lead: [
+        'A5',null,null,null,'E5',null,'A5',null,'C6',null,'B5',null,'A5',null,'E5',null,
+        'F5',null,null,null,'A5',null,'C6',null,'F5',null,'E5',null,'D5',null,'C5',null,
+        'G5',null,null,null,'E5',null,'G5',null,'C6',null,'B5',null,'G5',null,'E5',null,
+        'D6',null,'C6',null,'B5',null,'A5',null,'G5',null,'F5',null,'E5',null,'D5',null,
+        'A5',null,'C6',null,'E6',null,'D6',null,'C6',null,'B5',null,'A5',null,'G5',null,
+        'A5',null,'F5',null,'C6',null,'A5',null,'F5',null,'A5',null,'C6',null,'F6',null,
+        'G5',null,'E5',null,'C6',null,'G5',null,'E5',null,'G5',null,'C6',null,'E6',null,
+        'D6',null,'B5',null,'G5',null,'D5',null,'E5',null,'F5',null,'G5',null,'A5',null
+      ],
+      arp: [
+        'A3',null,'C4',null,'E4',null,'A4',null,'E4',null,'C4',null,'A3',null,'C4',null,
+        'F3',null,'A3',null,'C4',null,'F4',null,'C4',null,'A3',null,'F3',null,'A3',null,
+        'C4',null,'E4',null,'G4',null,'C5',null,'G4',null,'E4',null,'C4',null,'E4',null,
+        'G3',null,'B3',null,'D4',null,'G4',null,'D4',null,'B3',null,'G3',null,'B3',null,
+        'A3',null,'C4',null,'E4',null,'A4',null,'E4',null,'C4',null,'A3',null,'C4',null,
+        'F3',null,'A3',null,'C4',null,'F4',null,'C4',null,'A3',null,'F3',null,'A3',null,
+        'C4',null,'E4',null,'G4',null,'C5',null,'G4',null,'E4',null,'C4',null,'E4',null,
+        'G3',null,'B3',null,'D4',null,'G4',null,'D4',null,'B3',null,'G3',null,'B3',null
+      ]
+    },
+
+
+    // 第四章：警告·快节奏 · Dm (Dm-Bb-C-A) · 全 16 分 hat
+    ch4: { bpm: 156, length: 128,
+      kick:  [0, 2, 4, 8, 10, 12, 16, 18, 20, 24, 26, 28, 32, 34, 36, 40, 42, 44, 48, 50, 52, 56, 58, 60,
+              64, 66, 68, 72, 74, 76, 80, 82, 84, 88, 90, 92, 96, 98, 100, 104, 106, 108, 112, 114, 116, 120, 122, 124],
+      snare: [4, 12, 20, 28, 36, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116, 124],
+      hat:   Array.from({length:128},(_,i)=>i),
+      hatOpen: [14, 30, 46, 62, 78, 94, 110, 126],
+      bass: [
+        'D2',null,null,null,'D2',null,null,null,'F2',null,null,null,'A2',null,null,null,
+        'Bb1',null,null,null,'Bb1',null,null,null,'D2',null,null,null,'F2',null,null,null,
+        'C2',null,null,null,'C2',null,null,null,'E2',null,null,null,'G2',null,null,null,
+        'A1',null,null,null,'A1',null,null,null,'C#2',null,null,null,'E2',null,null,null,
+        'D2',null,null,null,'D2',null,null,null,'F2',null,null,null,'A2',null,null,null,
+        'Bb1',null,null,null,'Bb1',null,null,null,'D2',null,null,null,'F2',null,null,null,
+        'C2',null,null,null,'C2',null,null,null,'E2',null,null,null,'G2',null,null,null,
+        'A1',null,null,null,'A1',null,null,null,'C#2',null,null,null,'E2',null,null,null
+      ],
+      lead: [
+        'D5',null,'F5',null,'A5',null,'F5',null,'E5',null,'D5',null,'A4',null,'D5',null,
+        'Bb4',null,'D5',null,'F5',null,'D5',null,'C5',null,'Bb4',null,'F4',null,'Bb4',null,
+        'C5',null,'E5',null,'G5',null,'E5',null,'D5',null,'C5',null,'G4',null,'C5',null,
+        'A4',null,'C#5',null,'E5',null,'C#5',null,'D5',null,'E5',null,'A5',null,null,null,
+        'A5',null,null,null,'F5',null,'D5',null,'E5',null,'F5',null,'A5',null,'C6',null,
+        'D6',null,'C6',null,'Bb5',null,'A5',null,'G5',null,'F5',null,'D5',null,'Bb4',null,
+        'E5',null,'G5',null,'C6',null,'E6',null,'D6',null,'C6',null,'G5',null,'E5',null,
+        'C#6',null,'B5',null,'A5',null,'E5',null,'D5',null,'E5',null,'A5',null,null,null
+      ]
+    },
+
+    // 第五章：高压·紧迫·终局 · Bm→Bb→A→F# 半音下行 · 全速驱动
+ch5: { bpm: 160, length: 128,
+  kick:  [0,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,
+          64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124],
+  snare: [4,12,20,28,36,44,52,60,68,76,84,92,100,108,116,124],
+  hat:   Array.from({length:128},(_,i)=>i),
+  hatOpen: [14,30,46,62,78,94,110,126],
+  bass: [
+    'B1',null,'B1',null,'B1',null,'B1',null,'B1',null,'B1',null,'B1',null,'B2',null,
+    'Bb1',null,'Bb1',null,'Bb1',null,'Bb1',null,'Bb1',null,'Bb1',null,'Bb1',null,'Bb2',null,
+    'A1',null,'A1',null,'A1',null,'A1',null,'A1',null,'A1',null,'A1',null,'A2',null,
+    'F#1',null,'F#1',null,'F#1',null,'F#1',null,'F#1',null,'F#1',null,'F#1',null,'F#2',null,
+    'B1',null,'B1',null,'B1',null,'B1',null,'B1',null,'B1',null,'B1',null,'B2',null,
+    'Bb1',null,'Bb1',null,'Bb1',null,'Bb1',null,'Bb1',null,'Bb1',null,'Bb1',null,'Bb2',null,
+    'G1',null,'G1',null,'G1',null,'G1',null,'G1',null,'G1',null,'G1',null,'G2',null,
+    'F#1',null,'F#1',null,'F#1',null,'F#1',null,'F#1',null,'F#1',null,'F#1',null,'F#2',null
+  ],
+  lead: [
+    'B5','A5','F#5','D5',null,null,null,null,'B5','A5','F#5','D5',null,null,null,null,
+    'Bb5','A5','F5','D5',null,null,null,null,'Bb5','A5','F5','D5',null,null,null,null,
+    null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,
+    'F#5','E5','C#5','A#4',null,null,null,null,'F#5','E5','C#5','A#4',null,null,null,null,
+    'B5',null,'D6',null,'F#6',null,'E6',null,'D6',null,'B5',null,'A5',null,'F#5',null,
+    'Bb5',null,'D6',null,'F6',null,'Eb6',null,'D6',null,'Bb5',null,'A5',null,'F5',null,
+    'G5',null,'B5',null,'D6',null,'C6',null,'B5',null,'G5',null,'D5',null,'B4',null,
+    'F#5','A#5','C#6','F#6',null,null,null,null,'E6','C#6','A#5','F#5',null,null,null,null
+  ],
+  arp: [
+    null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,
+    null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,
+    'A5',null,'E5',null,'A5',null,'C6',null,'A5',null,'E5',null,'A5',null,'C6',null,
+    null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,
+    null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,
+    null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,
+    'G5',null,'D5',null,'G5',null,'B5',null,'G5',null,'D5',null,'G5',null,'B5',null,
+    null,null,null,null,null,null,null,null,null,null,null,null,null,null,null,null
+  ]
+}
+  };
+
+  const bgm = { on: false, name: null, step: 0, nextTime: 0, timer: null };
+  function scheduleBgm(){
+    if (!bgm.on || !ctx) return;
+    if (muted || VOL.music <= 0.001 || ctx.state !== 'running') return;
+    const tr = TRACKS[bgm.name];
+    if (!tr) return;
+    const stepDur = 60 / tr.bpm / 4;
+    const total = tr.length || 128;
+    if (bgm.nextTime < ctx.currentTime) bgm.nextTime = ctx.currentTime + 0.06;
+    const horizon = ctx.currentTime + 0.12;
+    while (bgm.nextTime < horizon) {
+      const i = bgm.step % total, t = bgm.nextTime;
+      if (tr.kick  && tr.kick.indexOf(i)  !== -1) kick(t);
+      if (tr.snare && tr.snare.indexOf(i) !== -1) snare(t);
+      if (tr.hat   && tr.hat.indexOf(i)   !== -1) hat(t, tr.hatOpen && tr.hatOpen.indexOf(i) !== -1);
+      const bassDur = stepDur * 1.8;
+      if (tr.bass && tr.bass[i]) bassNote(t, nf(tr.bass[i]), bassDur);
+      if (tr.lead && tr.lead[i]) leadNote(t, nf(tr.lead[i]), stepDur * 1.6);
+      if (tr.arp  && tr.arp[i])  arpNote(t, nf(tr.arp[i]), stepDur * 1.2);
+      bgm.nextTime += stepDur;
+      bgm.step++;
+    }
+  }
+  function startBgm(name){
+    init(); if (!ctx) return;
+    if (ctx.state === 'suspended') ctx.resume();
+    if (bgm.on && bgm.name === name) return;
+    stopBgm();
+    if (!TRACKS[name]) return;
+    bgm.on = true; bgm.name = name; bgm.step = 0;
+    bgm.nextTime = ctx.currentTime + 0.12;
+    bgm.timer = setInterval(scheduleBgm, 18);
+  }
+  function stopBgm(){
+    bgm.on = false; bgm.name = null;
+    if (bgm.timer) { clearInterval(bgm.timer); bgm.timer = null; }
+  }
+  function setMusicDuck(on){
+    if (!musicBus || !ctx) return;
+    musicBus.gain.setTargetAtTime(on ? Math.max(0.001, VOL.music * 0.22) : VOL.music, ctx.currentTime, 0.15);
+  }
+  function setVolume(key, v){
+    v = Math.max(0, Math.min(1, v));
+    VOL[key] = v; saveVol();
+    if (!ctx) return;
+    if (key === 'master') { if (master) master.gain.setTargetAtTime(muted ? 0 : v, ctx.currentTime, 0.03); }
+    else if (key === 'music') {
+      if (musicBus) musicBus.gain.setTargetAtTime(v, ctx.currentTime, 0.03);
+      if (v <= 0.001) stopBgm();
+    } else if (key === 'sfx') {
+      if (sfxBus) sfxBus.gain.setTargetAtTime(v, ctx.currentTime, 0.03);
+    }
+  }
+  function setMuted(v){
+    muted = !!v;
+    try { localStorage.setItem('ge_audio_muted', muted ? '1' : '0'); } catch(e){}
+    if (master && ctx) master.gain.setTargetAtTime(muted ? 0 : VOL.master, ctx.currentTime, 0.05);
+    if (muted) stopBgm();
+  }
+
+  return {
+    unlock, play, startBgm, stopBgm, setMusicDuck,
+    setVolume, setMuted,
+    toggleMute: () => { setMuted(!muted); return muted; },
+    isMuted: () => muted, isReady: () => audioReady,
+    getVolume: (k) => VOL[k], getTracks: () => Object.keys(TRACKS)
+  };
+})();
+
+/* ============================================================
+   音效挂接（monkey-patch 到现有函数）
+   ============================================================ */
+(function(){
+
+  /* 1. 玩家受伤 */
+  const _hurt = hurt;
+  hurt = function(){
+    const before = P.hp, r = _hurt();
+    if (P.hp < before) Sound.play('hurt');
+    return r;
+  };
+
+  /* 2. 敌人死亡 / 粒子爆炸按层级选音色 */
+  const _boom = boom;
+  boom = function(e){
+    const tier = (typeof TIER !== 'undefined' && TIER[e.t]) || 0;
+    if (tier >= 2) Sound.play('explosion');
+    else if (tier === 1) Sound.play('pop');
+    else Sound.play('kill');
+    return _boom.apply(this, arguments);
+  };
+
+  /* 3. 导弹 / 无人机爆炸 */
+  ['explode','c2Explosion','c3Explosion','c4Explosion','c5Explosion'].forEach(name => {
+    const orig = window[name]; if (typeof orig !== 'function') return;
+    window[name] = function(){ Sound.play('missile'); return orig.apply(this, arguments); };
+  });
+
+  /* 4. Boss 登场警报 */
+  ['spawnBoss','spawnLelo','spawnC3Boss','spawnC4Boss','spawnC5Boss'].forEach(name => {
+    const orig = window[name]; if (typeof orig !== 'function') return;
+    window[name] = function(){ Sound.play('warning'); return orig.apply(this, arguments); };
+  });
+
+  /* 5. Boss 击破 */
+  const _bossDown = bossDown;
+  bossDown = function(){
+    const wasFinal = bs && bs.stage >= 2;
+    const r = _bossDown.apply(this, arguments);
+    if (wasFinal) Sound.play('bossDown');
+    return r;
+  };
+  const _c2BossDamage = c2BossDamage;
+  c2BossDamage = function(){
+    const boss = c2Boss, wasAlive = boss && !boss.dead && boss.hp > 0;
+    const r = _c2BossDamage.apply(this, arguments);
+    if (wasAlive && boss && boss.dead) Sound.play('bossDown');
+    return r;
+  };
+  ['c3FinishBoss','c4FinishBoss','c5FinishBoss'].forEach(name => {
+    const orig = window[name]; if (typeof orig !== 'function') return;
+    window[name] = function(root){
+      const was = root && root.finished;
+      const r = orig.apply(this, arguments);
+      if (!was && root && root.finished) Sound.play('bossDown');
+      return r;
+    };
+  });
+
+  /* 6. 购买升级 */
+  const _buyUpgrade = buyUpgrade;
+  buyUpgrade = function(i){
+    const ok = _buyUpgrade(i);
+    if (ok) Sound.play('upgrade');
+    return ok;
+  };
+
+  /* 7. 玩家射击（保留射击节奏，节流防止刺耳） */
+  const _firePrimary = firePrimary;
+  firePrimary = function(){
+    const wasReady = P.cd <= 0;
+    const r = _firePrimary();
+    if (wasReady && P.cd > 0) Sound.play('shoot');
+    return r;
+  };
+
+  /* 8. 弹窗面板：胜利 / 失败 */
+  const _panel = panel;
+  panel = function(t){
+    if (st === 'win') Sound.play('win');
+    else if (/击毁|失败/.test(t)) Sound.play('gameover');
+    return _panel.apply(this, arguments);
+  };
+
+  /* 9. 新关卡开始 */
+  const _newGame = newGame;
+  newGame = function(){
+    const r = _newGame();
+    Sound.play('levelStart');
+    return r;
+  };
+
+  /* 10. UI 按钮点击 */
+  document.addEventListener('click', e => {
+    const b = e.target && e.target.closest && e.target.closest('button');
+    if (b && !b.disabled && b.id !== 'mb') Sound.play('click');
+  }, true);
+
+  /* 11. 首次手势解锁音频 */
+  function firstGesture(){
+    Sound.unlock();
+    document.removeEventListener('pointerdown', firstGesture, true);
+    document.removeEventListener('keydown', firstGesture, true);
+    document.removeEventListener('touchstart', firstGesture, true);
+  }
+  document.addEventListener('pointerdown', firstGesture, true);
+  document.addEventListener('keydown', firstGesture, true);
+  document.addEventListener('touchstart', firstGesture, true);
+
+  /* 12. BGM 随状态切换 + 暂停时 ducking */
+  let musicKey = '', lastDuck = null;
+  function updateMusicState(){
+    if (!Sound.isReady()) return;
+    if (lastDuck !== paused) { lastDuck = paused; Sound.setMusicDuck(paused); }
+    if (Sound.getVolume('music') <= 0.001) return;
+    const key = st + '|' + chapter;
+    if (key === musicKey) return;
+    musicKey = key;
+    if (st === 'home' || st === 'menu' || st === 'chapterIntro' || st === 'start') {
+      Sound.startBgm('menu');
+    } else if (st === 'play' || st === 'clear' || st === 'over') {
+      Sound.startBgm(['ch1','ch2','ch3','ch4','ch5'][chapter] || 'ch1');
+    } else {
+      Sound.stopBgm();
+    }
+  }
+  setInterval(updateMusicState, 250);
+
+  /* 13. 页面隐藏 / 恢复 */
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && Sound.isReady()) Sound.unlock();
+  });
+
+  /* 14. HUD 里的静音按钮 */
+  (function addMuteButton(){
+    const tr = document.querySelector('.hud.top .tr');
+    if (!tr) return;
+    const btn = document.createElement('button');
+    btn.id = 'mb'; btn.type = 'button';
+    btn.style.cssText = 'width:44px;padding:0;font-size:16px;line-height:1;';
+    btn.textContent = Sound.isMuted() ? '🔇' : '🔊';
+    btn.setAttribute('aria-label', Sound.isMuted() ? '取消静音' : '静音');
+    btn.addEventListener('click', () => {
+      const m = Sound.toggleMute();
+      btn.textContent = m ? '🔇' : '🔊';
+      btn.setAttribute('aria-label', m ? '取消静音' : '静音');
+      if (!m) updateMusicState();
+    });
+    tr.insertBefore(btn, tr.firstChild);
+  })();
+
+})();
+
+
+/* ============================================================
+   音量控制台（动态插入到设置面板）
+   ============================================================ */
+(function(){
+  // 样式
+  if (!document.getElementById('audioUICSS')) {
+    const style = document.createElement('style');
+    style.id = 'audioUICSS';
+    style.textContent = `
+      #audioArea{margin-top:16px;padding-top:14px;border-top:1px solid color-mix(in srgb,var(--fg) 30%,transparent);text-align:left}
+      #audioArea h2{font-size:13px;margin:0 0 12px}
+      .vol-row{display:grid;grid-template-columns:56px 1fr 36px;gap:10px;align-items:center;margin:10px 0;font-size:11px}
+      .vol-row label{opacity:.8}
+      .vol-row input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:22px;background:transparent;cursor:pointer;touch-action:manipulation}
+      .vol-row input[type=range]::-webkit-slider-runnable-track{height:2px;background:color-mix(in srgb,var(--fg) 70%,transparent)}
+      .vol-row input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;background:var(--fg);margin-top:-8px;border:none;box-shadow:0 0 0 1px var(--bg)}
+      .vol-row input[type=range]::-moz-range-track{height:2px;background:color-mix(in srgb,var(--fg) 70%,transparent)}
+      .vol-row input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:var(--fg);border:none}
+      .vol-row span{text-align:right;opacity:.7;font-variant-numeric:tabular-nums}
+    `;
+    document.head.appendChild(style);
+  }
+
+  // DOM：插到 #saveArea 前面
+  const saveArea = document.getElementById('saveArea');
+  if (!saveArea || document.getElementById('audioArea')) return;
+  const section = document.createElement('section');
+  section.id = 'audioArea';
+  section.innerHTML = `
+    <h2>音频</h2>
+    <div class="vol-row"><label for="volMaster">总音量</label><input type="range" id="volMaster" min="0" max="100" step="1"><span id="volMasterVal">80</span></div>
+    <div class="vol-row"><label for="volMusic">音乐</label><input type="range" id="volMusic" min="0" max="100" step="1"><span id="volMusicVal">55</span></div>
+    <div class="vol-row"><label for="volSfx">音效</label><input type="range" id="volSfx" min="0" max="100" step="1"><span id="volSfxVal">70</span></div>
+  `;
+  saveArea.parentNode.insertBefore(section, saveArea);
+
+  // 绑定
+  const pairs = [
+    ['volMaster', 'master'],
+    ['volMusic',  'music'],
+    ['volSfx',    'sfx']
+  ];
+  for (const [id, key] of pairs) {
+    const el = document.getElementById(id);
+    const val = document.getElementById(id + 'Val');
+    if (!el) continue;
+    el.value = Math.round(Sound.getVolume(key) * 100);
+    if (val) val.textContent = el.value;
+    el.addEventListener('input', () => {
+      const v = Math.max(0, Math.min(100, Number(el.value))) / 100;
+      Sound.setVolume(key, v);
+      if (val) val.textContent = Math.round(v * 100);
+      if (key === 'music' && v > 0) {
+        // 从 0 拉回来时重新启动 BGM
+        const ev = new Event('music-resume');
+        document.dispatchEvent(ev);
+      }
+    });
+  }
+
+  // 音乐从 0 恢复时触发 updateMusicState
+  document.addEventListener('music-resume', () => {
+    if (typeof window.__geUpdateMusic === 'function') window.__geUpdateMusic();
+  });
+})();
 </script>
 </body></html>
